@@ -1,0 +1,387 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  updateDoc 
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  TrendingUp, 
+  User, 
+  LogOut, 
+  DollarSign, 
+  Briefcase, 
+  BarChart3, 
+  Settings,
+  Wallet,
+  CheckCircle2,
+  Save
+} from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'stock-sim-eg-v2';
+
+// --- Constants ---
+const USERS = [
+  { id: 'user1', password: 'user1', role: 'user' },
+  { id: 'user2', password: 'user2', role: 'user' },
+  { id: 'user3', password: 'user3', role: 'user' },
+  { id: 'user4', password: 'user4', role: 'user' },
+  { id: 'admin', password: 'admin', role: 'admin' }
+];
+
+const INITIAL_BALANCE = 50000;
+const INITIAL_STOCKS = [
+  { id: 'COMI', name: 'البنك التجاري الدولي (CIB)', price: 85.50 },
+  { id: 'EALU', name: 'مصر للألومنيوم', price: 110.25 },
+  { id: 'SWDY', name: 'السويدي إليكتريك', price: 45.80 },
+  { id: 'ABUK', name: 'أبو قير للأسمدة', price: 62.40 },
+  { id: 'ESRS', name: 'حديد عز', price: 92.15 }
+];
+
+export default function App() {
+  const [user, setUser] = useState(null); 
+  const [currentUser, setCurrentUser] = useState(null); 
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [error, setError] = useState('');
+  
+  const [marketData, setMarketData] = useState([]);
+  const [userData, setUserData] = useState(null);
+  const [teams, setTeams] = useState({});
+  const [allTeamsBalances, setAllTeamsBalances] = useState({});
+  const [syncStatus, setSyncStatus] = useState({});
+
+  const marketDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'market_data', 'main');
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    // Market Listener
+    const unsubMarket = onSnapshot(marketDocRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        setMarketData(data.stocks || INITIAL_STOCKS);
+        setTeams(data.teams || {});
+      } else {
+        setDoc(marketDocRef, { 
+          stocks: INITIAL_STOCKS, 
+          teams: { user1: 'الفريق 1', user2: 'الفريق 2', user3: 'الفريق 3', user4: 'الفريق 4' } 
+        });
+      }
+    }, (err) => console.error("Market error:", err));
+
+    // User/Player Listener
+    let unsubUser = () => {};
+    if (currentUser && currentUser.role === 'user') {
+      const userDocRef = doc(db, 'artifacts', appId, 'users', currentUser.id, 'portfolio', 'data');
+      unsubUser = onSnapshot(userDocRef, (snapshot) => {
+        if (snapshot.exists()) {
+          setUserData(snapshot.data());
+        } else {
+          const initial = { balance: INITIAL_BALANCE, holdings: {} };
+          setDoc(userDocRef, initial);
+          setUserData(initial);
+        }
+      }, (err) => console.error("User data error:", err));
+    }
+
+    // Admin Observers for all teams
+    const unsubBalances = [];
+    if (currentUser && currentUser.role === 'admin') {
+      ['user1', 'user2', 'user3', 'user4'].forEach(uid => {
+        const uRef = doc(db, 'artifacts', appId, 'users', uid, 'portfolio', 'data');
+        const unsub = onSnapshot(uRef, (snap) => {
+          if (snap.exists()) {
+            const d = snap.data();
+            setAllTeamsBalances(prev => ({ ...prev, [uid]: d.balance }));
+          }
+        });
+        unsubBalances.push(unsub);
+      });
+    }
+
+    return () => {
+      unsubMarket();
+      unsubUser();
+      unsubBalances.forEach(u => u());
+    };
+  }, [user, currentUser]);
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    const appUser = USERS.find(u => u.id === loginForm.username && u.password === loginForm.password);
+    if (appUser) {
+      setCurrentUser(appUser);
+      setError('');
+    } else {
+      setError('خطأ في اسم المستخدم أو كلمة المرور');
+    }
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setUserData(null);
+  };
+
+  const buyStock = async (stockId) => {
+    if (!user || !userData || !currentUser) return;
+    const stock = marketData.find(s => s.id === stockId);
+    if (userData.balance < stock.price) {
+      setError("رصيد غير كافٍ!");
+      setTimeout(() => setError(''), 3000);
+      return;
+    }
+    const userDocRef = doc(db, 'artifacts', appId, 'users', currentUser.id, 'portfolio', 'data');
+    const newHoldings = { ...userData.holdings };
+    newHoldings[stockId] = (newHoldings[stockId] || 0) + 1;
+    await updateDoc(userDocRef, {
+      balance: userData.balance - stock.price,
+      holdings: newHoldings
+    });
+  };
+
+  const sellStock = async (stockId) => {
+    if (!user || !userData || !currentUser) return;
+    const currentHolding = userData.holdings[stockId] || 0;
+    if (currentHolding <= 0) return;
+    const stock = marketData.find(s => s.id === stockId);
+    const userDocRef = doc(db, 'artifacts', appId, 'users', currentUser.id, 'portfolio', 'data');
+    const newHoldings = { ...userData.holdings };
+    newHoldings[stockId] -= 1;
+    if (newHoldings[stockId] <= 0) delete newHoldings[stockId];
+    await updateDoc(userDocRef, {
+      balance: userData.balance + stock.price,
+      holdings: newHoldings
+    });
+  };
+
+  // --- Admin Logic ---
+  const updateStockPrice = async (stockId, newPrice) => {
+    if (!user) return;
+    const price = parseFloat(newPrice);
+    if (isNaN(price)) return;
+    const newStocks = marketData.map(s => s.id === stockId ? { ...s, price } : s);
+    await updateDoc(marketDocRef, { stocks: newStocks });
+  };
+
+  const updateTeamName = async (userId, newName) => {
+    if (!user) return;
+    await updateDoc(marketDocRef, { [`teams.${userId}`]: newName });
+  };
+
+  const executeTeamBalanceUpdate = async (userId) => {
+    const val = parseFloat(allTeamsBalances[userId]);
+    if (isNaN(val)) return;
+    try {
+      setSyncStatus(prev => ({ ...prev, [userId]: 'saving' }));
+      const userDocRef = doc(db, 'artifacts', appId, 'users', userId, 'portfolio', 'data');
+      await updateDoc(userDocRef, { balance: val });
+      setSyncStatus(prev => ({ ...prev, [userId]: 'saved' }));
+      setTimeout(() => setSyncStatus(prev => ({ ...prev, [userId]: null })), 2000);
+    } catch (e) {
+      console.error(e);
+      setSyncStatus(prev => ({ ...prev, [userId]: 'error' }));
+    }
+  };
+
+  if (authLoading) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">جاري التحميل...</div>;
+
+  if (!currentUser) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-slate-950 p-4" dir="rtl">
+        <div className="w-full max-w-md bg-slate-900 rounded-2xl p-8 border border-slate-800">
+          <div className="flex flex-col items-center mb-8 text-center">
+            <div className="bg-emerald-600 p-3 rounded-xl mb-4 text-white"><BarChart3 size={32} /></div>
+            <h1 className="text-2xl font-bold text-white">دخول البورصة</h1>
+          </div>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <input 
+              type="text" className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white text-right outline-none focus:ring-2 focus:ring-emerald-500"
+              value={loginForm.username} onChange={e => setLoginForm({...loginForm, username: e.target.value})} placeholder="اسم المستخدم"
+            />
+            <input 
+              type="password" className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white text-right outline-none focus:ring-2 focus:ring-emerald-500"
+              value={loginForm.password} onChange={e => setLoginForm({...loginForm, password: e.target.value})} placeholder="كلمة المرور"
+            />
+            {error && <p className="text-red-400 text-sm text-center">{error}</p>}
+            <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 rounded-lg">دخول</button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200" dir="rtl">
+      <nav className="border-b border-slate-800 bg-slate-900/50 p-4 sticky top-0 z-50 backdrop-blur-md">
+        <div className="max-w-7xl mx-auto flex justify-between items-center">
+          <div className="flex items-center gap-2 font-bold text-white"><BarChart3 className="text-emerald-500" /> EG-STOCK</div>
+          <div className="flex items-center gap-4">
+            <span className="text-sm font-bold text-emerald-400">{currentUser.role === 'admin' ? 'المدير' : teams[currentUser.id] || currentUser.id}</span>
+            <button onClick={handleLogout} className="bg-slate-800 p-2 rounded-full text-slate-400 hover:text-white"><LogOut size={18} /></button>
+          </div>
+        </div>
+      </nav>
+
+      <main className="max-w-7xl mx-auto px-4 py-8">
+        {currentUser.role === 'admin' ? (
+          <div className="space-y-8 animate-in fade-in">
+            <h2 className="text-2xl font-bold text-white mb-6 pr-4 border-r-4 border-emerald-500">لوحة التحكم</h2>
+            <div className="grid lg:grid-cols-2 gap-8">
+              
+              {/* الأسعار */}
+              <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
+                <h3 className="text-lg font-semibold mb-6 flex items-center gap-2 text-emerald-500"><DollarSign size={20}/> تعديل الأسعار</h3>
+                <div className="space-y-3">
+                  {marketData.map(stock => (
+                    <div key={stock.id} className="flex justify-between items-center bg-slate-800/50 p-4 rounded-xl">
+                      <div className="text-right">
+                        <p className="font-bold text-white">{stock.id}</p>
+                        <p className="text-xs text-slate-400">{stock.name}</p>
+                      </div>
+                      <input 
+                        type="number" step="0.01"
+                        className="w-28 bg-slate-950 text-right px-3 py-2 rounded-lg border border-slate-700 text-emerald-400" 
+                        defaultValue={stock.price}
+                        onBlur={(e) => updateStockPrice(stock.id, e.target.value)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* الفرق والأرصدة */}
+              <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
+                <h3 className="text-lg font-semibold mb-6 flex items-center gap-2 text-blue-500"><Settings size={20}/> أرصدة الفرق</h3>
+                <div className="space-y-4">
+                  {['user1', 'user2', 'user3', 'user4'].map(uid => (
+                    <div key={uid} className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 space-y-4">
+                      <div className="flex justify-between items-center border-b border-slate-700 pb-2">
+                        <span className="text-xs font-mono text-slate-400">{uid}</span>
+                        {syncStatus[uid] === 'saved' && <span className="text-[10px] text-emerald-400 flex items-center gap-1"><CheckCircle2 size={12}/> تم الحفظ</span>}
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-slate-500">اسم الفريق</label>
+                          <input 
+                            type="text" className="w-full bg-slate-950 p-2 rounded-lg border border-slate-700 text-right text-sm" 
+                            defaultValue={teams[uid] || ''}
+                            onBlur={(e) => updateTeamName(uid, e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-slate-500">الرصيد</label>
+                          <div className="flex gap-2">
+                            <input 
+                              type="number" className="flex-1 bg-slate-950 p-2 rounded-lg border border-slate-700 text-right text-sm text-blue-400 font-mono" 
+                              value={allTeamsBalances[uid] || ''}
+                              onChange={(e) => setAllTeamsBalances(prev => ({...prev, [uid]: e.target.value}))}
+                            />
+                            <button 
+                              onClick={() => executeTeamBalanceUpdate(uid)}
+                              disabled={syncStatus[uid] === 'saving'}
+                              className="bg-emerald-600 hover:bg-emerald-500 p-2 rounded-lg text-white"
+                            >
+                              <Save size={18}/>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        ) : (
+          <div className="grid lg:grid-cols-3 gap-8 animate-in slide-in-from-bottom">
+            {/* المحفظة */}
+            <div className="space-y-6">
+              <div className="bg-emerald-600 p-8 rounded-3xl text-white shadow-xl relative overflow-hidden">
+                <p className="text-xs opacity-80 mb-2">رصيدك المتاح</p>
+                <h2 className="text-4xl font-bold font-mono">
+                  {userData?.balance?.toLocaleString(undefined, {minimumFractionDigits: 2}) || '0.00'} 
+                  <span className="text-lg font-normal mr-2">ج.م</span>
+                </h2>
+              </div>
+              <div className="bg-slate-900 p-6 rounded-3xl border border-slate-800 shadow-xl">
+                <h3 className="font-bold mb-6 flex items-center gap-2 text-white text-lg"><Briefcase size={20} className="text-blue-500" /> أسهمك الحالية</h3>
+                <div className="space-y-3">
+                  {userData?.holdings && Object.entries(userData.holdings).length > 0 ? (
+                    Object.entries(userData.holdings).map(([id, qty]) => (
+                      <div key={id} className="flex justify-between items-center p-3 rounded-xl bg-slate-800/30 border border-slate-800">
+                        <span className="text-white font-bold">{id}</span>
+                        <span className="font-bold text-emerald-400">{qty} سهم</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-slate-500 text-sm text-center py-6">المحفظة خالية</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* السوق */}
+            <div className="lg:col-span-2 bg-slate-900 p-8 rounded-3xl border border-slate-800 shadow-xl">
+              <h3 className="font-bold mb-8 text-white text-2xl border-r-4 border-blue-500 pr-4">سوق الأوراق المالية</h3>
+              <div className="grid sm:grid-cols-2 gap-6">
+                {marketData.map(stock => (
+                  <div key={stock.id} className="bg-slate-950 p-6 rounded-2xl border border-slate-800 hover:border-emerald-500/40 transition-all">
+                    <div className="flex justify-between mb-4">
+                      <span className="font-bold text-white text-lg">{stock.name}</span>
+                      <span className="text-xs bg-slate-800 px-2 py-1 rounded text-slate-400 font-mono">{stock.id}</span>
+                    </div>
+                    <div className="mb-6 flex items-baseline gap-1">
+                      <span className="text-3xl font-mono font-bold text-white tracking-tighter">{stock.price.toFixed(2)}</span>
+                      <span className="text-xs text-slate-500 font-bold">ج.م</span>
+                    </div>
+                    <div className="flex gap-3">
+                      <button onClick={() => buyStock(stock.id)} className="flex-1 bg-emerald-600/10 text-emerald-400 py-3 rounded-xl hover:bg-emerald-600 hover:text-white transition-all font-bold">شراء</button>
+                      <button onClick={() => sellStock(stock.id)} className="flex-1 bg-red-600/10 text-red-400 py-3 rounded-xl hover:bg-red-600 hover:text-white transition-all font-bold">بيع</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
